@@ -1,20 +1,20 @@
 <?php
 /**
- * GeoMate plugin for Craft CMS 4.x
+ * GeoMate plugin for Craft CMS 3.x
  *
  * Look up visitors location data based on their IP and easily redirect them to the correct site..
  *
  * @link      https://www.vaersaagod.no
- * @copyright Copyright (c) 2022 Værsågod
+ * @copyright Copyright (c) 2018 Værsågod
  */
 
 namespace vaersaagod\geomate\services;
 
+
 use Craft;
 use craft\base\Component;
 use craft\errors\SiteNotFoundException;
-use GeoIp2\Model\City;
-use GeoIp2\Model\Country;
+use craft\helpers\ArrayHelper;
 use vaersaagod\geomate\GeoMate;
 use vaersaagod\geomate\helpers\GeoMateHelper;
 use vaersaagod\geomate\models\RedirectInfo;
@@ -42,7 +42,7 @@ class RedirectService extends Component
 
         $redirectInfo = $this->getRedirectInfo();
 
-        if ($redirectInfo !== null) {
+        if ($redirectInfo) {
             Craft::$app->getSession()->setFlash('geomateIsRedirected', true);
             
             Craft::$app->getResponse()->redirect(
@@ -82,10 +82,11 @@ class RedirectService extends Component
         }
         
         $countryInfo = GeoMate::$plugin->geo->getCountryInfo($ip);
+        $cityInfo = GeoMate::$plugin->geo->getCityInfo($ip);
         $needsCountryInfo = !in_array($settings->redirectMapSimpleModeKey, ['language', 'languageRegion']);
 
         if ($countryInfo === null && $needsCountryInfo) {
-            GeoMate::log('IP `' . $ip . '` was not found in country database.', Logger::LEVEL_WARNING);
+            GeoMate::log('IP `'.$ip.'` was not found in country database.', Logger::LEVEL_WARNING);
             return null;
         }
 
@@ -96,7 +97,7 @@ class RedirectService extends Component
             $applicableSite = Craft::$app->getSites()->getSiteByHandle($overrideCookie);
             $isOverridden = true;
         } else {
-            $applicableSiteHandle = $this->getSiteFromInfoAndMap($countryInfo, $redirectMap);
+            $applicableSiteHandle = $this->getSiteFromInfoAndMap($countryInfo, $cityInfo, $redirectMap);
 
             if ($applicableSiteHandle === null) {
                 return null;
@@ -107,7 +108,7 @@ class RedirectService extends Component
 
         try {
             $currentSite = Craft::$app->getSites()->getCurrentSite();
-        } catch (SiteNotFoundException) {
+        } catch (SiteNotFoundException $e) {
             return null;
         }
 
@@ -141,6 +142,7 @@ class RedirectService extends Component
 
     /**
      * @param string $val
+     * @return string
      */
     public function addOverrideParam($val): string
     {
@@ -151,6 +153,7 @@ class RedirectService extends Component
 
     /**
      * @param string $val
+     * @return string
      */
     public function addRedirectParam($val): string
     {
@@ -167,18 +170,21 @@ class RedirectService extends Component
         try {
             $currentSite = Craft::$app->getSites()->getCurrentSite();
             GeoMate::$plugin->cookie->setOverrideCookie($currentSite);
-        } catch (SiteNotFoundException) {
+        } catch (SiteNotFoundException $e) {
+
         }
     }
 
 
     // Private Methods
     // =========================================================================
+
     /**
+     * @param \GeoIp2\Model\City|\GeoIp2\Model\Country $countryInfo
      * @param array $redirectMap
      * @return null|string
      */
-    private function getSiteFromInfoAndMap(City|Country $countryInfo, $redirectMap)
+    private function getSiteFromInfoAndMap($countryInfo, $cityInfo, $redirectMap)
     {
         /** @var Settings $settings */
         $settings = GeoMate::$plugin->getSettings();
@@ -203,7 +209,14 @@ class RedirectService extends Component
                             } elseif (strtolower($countryInfo->country->isoCode) !== strtolower($criteriaVal)) {
                                 $isApplicable = false;
                             }
-
+                            break;
+                        case 'subdivision': 
+                            $ipSubdivisions = ArrayHelper::getColumn($cityInfo->subdivisions, function($item) {
+                                return strtolower($item->isoCode);
+                            });
+                            if(!\in_array(strtolower($criteriaVal), $ipSubdivisions)) {
+                                $isApplicable = false;
+                            }
                             break;
                         case 'continent':
                             if (\is_array($criteriaVal)) {
@@ -213,25 +226,21 @@ class RedirectService extends Component
                             } elseif (strtolower($countryInfo->continent->code) !== strtolower($criteriaVal)) {
                                 $isApplicable = false;
                             }
-
                             break;
                         case 'isInEuropeanUnion':
                             if ($countryInfo->country->isInEuropeanUnion !== $criteriaVal) {
                                 $isApplicable = false;
                             }
-
                             break;
                         case 'language':
                             if (!GeoMateHelper::isAcceptedLanguage($criteriaVal, $settings->minimumAcceptLanguageQuality)) {
                                 $isApplicable = false;
                             }
-
                             break;
                         case 'languageRegion':
                             if (!GeoMateHelper::isAcceptedLanguageRegion($criteriaVal, $settings->minimumAcceptLanguageQuality)) {
                                 $isApplicable = false;
                             }
-
                             break;
                     }
                 }
@@ -245,6 +254,9 @@ class RedirectService extends Component
         return null;
     }
 
+    /**
+     * @return bool
+     */
     private function shouldIgnoreUser(): bool
     {
         /** @var Settings $settings */
@@ -256,7 +268,7 @@ class RedirectService extends Component
                 return true;
             }
 
-            if ($settings->redirectIgnoreUserGroups && $settings->redirectIgnoreUserGroups !== []) {
+            if ($settings->redirectIgnoreUserGroups && \count($settings->redirectIgnoreUserGroups) > 0) {
                 foreach ($settings->redirectIgnoreUserGroups as $ignoreGroup) {
                     if ($user->isInGroup($ignoreGroup)) {
                         return true;
@@ -268,6 +280,9 @@ class RedirectService extends Component
         return false;
     }
 
+    /**
+     * @return bool
+     */
     private function shouldIgnoreUrl(): bool
     {
         /** @var Settings $settings */
@@ -275,7 +290,7 @@ class RedirectService extends Component
 
         try {
             $url = Craft::$app->getRequest()->getUrl();
-        } catch (InvalidConfigException) {
+        } catch (InvalidConfigException $e) {
             return false;
         }
 
@@ -286,7 +301,7 @@ class RedirectService extends Component
                     if ($url === $exactMatch) {
                         return true;
                     }
-                } elseif (preg_match($ignorePattern, $url)) {
+                } else if (preg_match($ignorePattern, $url)) {
                     return true;
                 }
             }
@@ -294,4 +309,5 @@ class RedirectService extends Component
 
         return false;
     }
+
 }
